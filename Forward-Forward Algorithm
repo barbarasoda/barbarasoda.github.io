@@ -1,0 +1,143 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+
+# -------------------------------
+# 1. Define a Forward-Forward Layer
+# -------------------------------
+
+class FFLayer(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(FFLayer, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        # Compute the layer’s activation
+        x = self.linear(x)
+        x = self.activation(x)
+        return x
+
+    def goodness(self, x):
+        # Here, goodness is defined as the sum of squares of the activations
+        return torch.sum(x ** 2, dim=1)
+
+
+# -------------------------------
+# 2. Build the Network
+# -------------------------------
+
+class FFNetwork(nn.Module):
+    def __init__(self):
+        super(FFNetwork, self).__init__()
+        # For example, for MNIST (28x28 images), we flatten the image to a vector of size 784.
+        self.layer1 = FFLayer(28 * 28, 256)
+        self.layer2 = FFLayer(256, 128)
+        self.layer3 = FFLayer(128, 64)
+
+    def forward(self, x):
+        # Return the activations from each layer.
+        a1 = self.layer1(x)
+        a2 = self.layer2(a1)
+        a3 = self.layer3(a2)
+        return [a1, a2, a3]
+
+
+# -------------------------------
+# 3. Training Using the Forward-Forward Algorithm
+# -------------------------------
+
+def train_forward_forward(network, dataloader, num_epochs=5, margin=1.0, device='cpu'):
+    """
+    Trains the network using the forward-forward algorithm.
+    
+    For each mini-batch, we:
+      1. Get a positive batch (real data).
+      2. Create a negative batch (here by shuffling the positive examples).
+      3. For each layer, pass both batches through, compute a local loss that:
+         - Penalizes if the goodness for positive data is below the margin.
+         - Penalizes if the goodness for negative data is above the margin.
+      4. Backpropagate the local loss and update the layer’s weights.
+         (Each layer has its own optimizer.)
+    """
+    # Create separate optimizers for each layer
+    optimizer1 = optim.Adam(network.layer1.parameters(), lr=1e-3)
+    optimizer2 = optim.Adam(network.layer2.parameters(), lr=1e-3)
+    optimizer3 = optim.Adam(network.layer3.parameters(), lr=1e-3)
+    optimizers = [optimizer1, optimizer2, optimizer3]
+
+    network.to(device)
+    network.train()
+
+    for epoch in range(num_epochs):
+        for batch_idx, (data, target) in enumerate(dataloader):
+            # Flatten the MNIST images and move data to the appropriate device.
+            data = data.view(data.size(0), -1).to(device)
+
+            # Create negative examples.
+            # Here, as a simple example, we shuffle the batch order.
+            neg_data = data[torch.randperm(data.size(0))]
+
+            # We will feed both positive and negative examples through each layer sequentially.
+            x_pos = data
+            x_neg = neg_data
+            layer_losses = []  # to store the loss from each layer for logging
+
+            # Loop over each layer and its optimizer
+            for layer, optimizer in zip([network.layer1, network.layer2, network.layer3], optimizers):
+                # Forward pass through the current layer.
+                x_pos = layer(x_pos)
+                x_neg = layer(x_neg)
+
+                # Compute the goodness measures.
+                goodness_pos = torch.sum(x_pos ** 2, dim=1)
+                goodness_neg = torch.sum(x_neg ** 2, dim=1)
+
+                # Define the local loss:
+                # - For positive examples, if goodness is below the margin, incur a loss.
+                # - For negative examples, if goodness is above the margin, incur a loss.
+                loss_pos = F.relu(margin - goodness_pos).mean()
+                loss_neg = F.relu(goodness_neg - margin).mean()
+                loss = loss_pos + loss_neg
+
+                layer_losses.append(loss.item())
+
+                # Backpropagate and update the parameters for the current layer.
+                optimizer.zero_grad()
+                # retain_graph=True is used because we use the same computational graph in multiple steps.
+                loss.backward(retain_graph=True)
+                optimizer.step()
+
+                # Detach the activations so that the next layer’s training is local
+                x_pos = x_pos.detach()
+                x_neg = x_neg.detach()
+
+            if batch_idx % 100 == 0:
+                print(f'Epoch {epoch+1}, Batch {batch_idx}: Layer losses: {layer_losses}')
+
+
+# -------------------------------
+# 4. Prepare Data and Run Training
+# -------------------------------
+
+# Use torchvision to load MNIST.
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))  # Standard normalization for MNIST.
+])
+
+train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+# Instantiate the network.
+ff_net = FFNetwork()
+
+# Choose device: use 'cuda' if available.
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Train the network using the forward-forward algorithm.
+train_forward_forward(ff_net, train_loader, num_epochs=5, margin=1.0, device=device)
